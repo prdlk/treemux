@@ -16,7 +16,7 @@ REFRESH_INTERVAL_INACTIVE_PANE="2"
 REFRESH_INTERVAL_INACTIVE_PANE_OPTION="@treemux-refresh-interval-inactive-pane"
 
 REFRESH_INTERVAL_INACTIVE_WINDOW="5"
-REFRESH_INTERVAL_INACTIVE_WINDOW="@treemux-refresh-interval-inactive-window"
+REFRESH_INTERVAL_INACTIVE_WINDOW_OPTION="@treemux-refresh-interval-inactive-window"
 
 NVIM_COMMAND="nvim"
 NVIM_COMMAND_OPTION="@treemux-nvim-command"

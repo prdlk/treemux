@@ -14,7 +14,7 @@ refresh_interval_inactive_pane() {
 }
 
 refresh_interval_inactive_window() {
-	get_tmux_option "$REFRESH_INTERVAL_INACTIVE_WINDOW" "$REFRESH_INTERVAL_INACTIVE_WINDOW"
+	get_tmux_option "$REFRESH_INTERVAL_INACTIVE_WINDOW_OPTION" "$REFRESH_INTERVAL_INACTIVE_WINDOW"
 }
 
 nvim_command() {

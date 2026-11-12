@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Author: Kiyoon Kim (https://github.com/kiyoon)
 
-if [[ $# -ne 9 ]]; then
-	echo "Usage: $0 <MAIN_PANE_ID> <SIDE_PANE_ID> <SIDE_PANE_ROOT> <NVIM_ADDR> <REFRESH_INTERVAL> <REFRESH_INTERVAL_INACTIVE_PANE> <REFRESH_INTERVAL_INACTIVE_WINDOW> <NVIM_COMMAND> <PYTHON_COMMAND>"
+if [[ $# -ne 7 ]]; then
+	echo "Usage: $0 <MAIN_PANE_ID> <SIDE_PANE_ID> <SIDE_PANE_ROOT> <NVIM_ADDR> <REFRESH_INTERVAL> <REFRESH_INTERVAL_INACTIVE_PANE> <REFRESH_INTERVAL_INACTIVE_WINDOW>"
 	echo "Arthor: Kiyoon Kim (https://github.com/kiyoon)"
 	echo "Track directory changes in the main pane, and refresh the side pane's Nvim-Tree every <REFRESH_INTERVAL> seconds."
 	echo "When going into child directories (cd dir), the side pane will keep the root directory."
@@ -21,178 +21,115 @@ NVIM_ADDR="$4"
 REFRESH_INTERVAL="$5"
 REFRESH_INTERVAL_INACTIVE_PANE="$6"
 REFRESH_INTERVAL_INACTIVE_WINDOW="$7"
-NVIM_COMMAND="$8"
-PYTHON_COMMAND="$9"
-
-echo "$NVIM_COMMAND"
 
 echo "$0 $@"
 echo "OSTYPE: $OSTYPE"	# log OS type
 tmux -V					# log tmux version
 
-main_pane_exists=1
-side_pane_exists=1
-tmux list-panes -t "$MAIN_PANE_ID" &> /dev/null
-[ "$?" -ne 0 ] && main_pane_exists=0
-tmux list-panes -t "$SIDE_PANE_ID" &> /dev/null
-[ "$?" -ne 0 ] && side_pane_exists=0
-
 # `tmux display` doesn't match strictly and it will give you any pane if not found.
-main_pane_pid=$(tmux display -pt "$MAIN_PANE_ID" '#{pane_pid}')
-if [[ -z $main_pane_pid ]]
-then
-	echo "Main pane $MAIN_PANE_ID does not exist."
+read -r -d '' main_pane_pid side_pane_pid < <(
+	tmux display -pt "$MAIN_PANE_ID" '#{pane_pid}' \; display -pt "$SIDE_PANE_ID" '#{pane_pid}' 2>/dev/null
+)
+if [[ -z $main_pane_pid || -z $side_pane_pid ]]; then
+	echo "Main pane $MAIN_PANE_ID or side pane $SIDE_PANE_ID not found. Exiting."
 	exit 101
 fi
 
-echo "Watching main pane (pid = $main_pane_pid)"
-main_pane_prevcwd=$(lsof -a -d cwd -p "$main_pane_pid" 2> /dev/null | awk_by_name '{print $(f["NAME"])}' | tail -n +2)
-# This does not work on MacOS.
-#main_pane_prevcwd=$(readlink -f "/proc/$main_pane_pid/cwd")
-side_pane_root="$main_pane_prevcwd"
+# The main pane's cwd. /proc where there is one (no process start); lsof
+# elsewhere (macOS).
+pane_cwd() {
+	if [[ -e /proc/$1/cwd ]]; then
+		readlink "/proc/$1/cwd"
+	else
+		lsof -a -d cwd -p "$1" 2> /dev/null | awk_by_name '{print $(f["NAME"])}' | tail -n +2
+	fi
+}
 
-# `tmux display` doesn't match strictly and it will give you any pane if not found.
-side_pane_pid=$(tmux display -pt "$SIDE_PANE_ID" '#{pane_pid}')
-if [[ -z $side_pane_pid ]]
-then
-	echo "Side pane $SIDE_PANE_ID not found. Exiting."
-	exit 102
-fi
+# Call scripts/tree/follow.lua in the sidebar nvim: tree_call <function> <args...>
+# Prints the function's result. Arguments are passed as a Vim list of
+# single-quoted strings ('' escapes a quote).
+tree_call() {
+	local fn="$1" arg list=""
+	shift
+	for arg in "$CURRENT_DIR/follow.lua" "$@"; do
+		list+="'${arg//\'/\'\'}',"
+	done
+	nvim --server "$NVIM_ADDR" --remote-expr "luaeval('dofile(_A[1]).$fn(unpack(_A, 2))', [${list%,}])" 2>/dev/null
+}
 
-echo "Updating side pane (Nvim-Tree/Neo-Tree, pid = $side_pane_pid)"
+# sleep without starting a process: read on a pipe nothing ever writes to
+exec {sleep_fd}<> <(:)
+nap() { read -rt "$1" -u "$sleep_fd"; }
 
+main_pane_prevcwd="$(pane_cwd "$main_pane_pid")"
+echo "Watching main pane (pid = $main_pane_pid), updating side pane (pid = $side_pane_pid)"
 echo "Initial main pane cwd: $main_pane_prevcwd"
 echo "Initial nvim-tree/neo-tree pane root: $SIDE_PANE_ROOT"
 echo "Waiting for the nvim-tree/neo-tree.."
-tree_filetype=$("$PYTHON_COMMAND" "$CURRENT_DIR/wait_treeinit.py" "$NVIM_ADDR")
-exit_code=$?
-if [[ $exit_code -ne 0 ]]
-then
-	echo "$CURRENT_DIR/wait_treeinit.py exited with code $exit_code."
-	if [[ $exit_code -eq 50 ]]
-	then
-		echo "pynvim not installed. Exiting.."
-        exit 106
-	elif [[ $exit_code -eq 51 ]]
-	then
-		echo "Nvim is not installed or could not be loaded. Exiting.."
-		exit 103
-	elif [[ $exit_code -eq 52 ]]
-	then
-		echo "Nvim-Tree/Neo-Tree is not installed or could not be loaded. Exiting.."
-		exit 104
-	else
-		echo "Unknown error. Exiting.."
-		exit 105
-	fi
+tree_filetype=""
+for _ in $(seq 500); do
+	tree_filetype="$(tree_call filetype)"
+	[[ $tree_filetype == neo-tree || $tree_filetype == NvimTree ]] && break
+	kill -0 "$side_pane_pid" 2>/dev/null || exit 0
+	nap 0.02
+done
+if [[ $tree_filetype != neo-tree && $tree_filetype != NvimTree ]]; then
+	echo "Nvim-Tree/Neo-Tree did not start (filetype: $tree_filetype). Exiting.."
+	exit 104
 fi
-tree_root_dir=$("$PYTHON_COMMAND" "$CURRENT_DIR/go_random_within_rootdir.py" "$NVIM_ADDR" "$main_pane_prevcwd" "$SIDE_PANE_ROOT")
-echo "$tree_filetype detected!"
-echo "Detected side pane root: $tree_root_dir"
-side_pane_root="$tree_root_dir"
+side_pane_root="$(tree_call go_random "$main_pane_prevcwd" "$SIDE_PANE_ROOT")"
+echo "$tree_filetype detected! Side pane root: $side_pane_root"
 
-while [[ $main_pane_exists -eq 1 ]] && [[ $side_pane_exists -eq 1 ]]; do
-	# optional: check if sidebar is running `nvim .`
-	# This does not work well in Mac..
-	# command_pid=$(ps -el | awk "\$5==$side_pane_pid" | awk '{print $4}')
-	# if [[ -z $command_pid ]]	# no command is running
-	# then
-	# 	echo "Exiting due to side pane having no command running. (pid = $side_pand_pid)"
-	# 	break
-	# else
-	# 	full_command=$(ps --no-headers -u -p $command_pid | awk '{for(i=11;i<=NF;++i)printf $i" "}' | xargs)	# xargs does trimming
-	# 	if [[ "$full_command" != "'$NVIM_COMMAND' . --listen "* ]]
-	# 	then
-	# 		echo "Exiting due to side pane not running 'nvim . --listen ...'. Instead, it's running: $full_command"
-	# 		break
-	# 	fi
-	# fi
-
-	main_pane_cwd=$(lsof -a -d cwd -p "$main_pane_pid" 2> /dev/null | awk_by_name '{print $(f["NAME"])}' | tail -n +2)
-	# This does not work on MacOS.
-	#main_pane_cwd=$(readlink -f "/proc/$main_pane_pid/cwd")
-	echo $main_pane_cwd
-
-	if [[ -z "$main_pane_cwd" ]]
-	then
-		echo "Can't find main pane's cwd. Exiting.."
-		break
+interval="$REFRESH_INTERVAL"
+tick=0
+# Both panes alive: their processes (the pane's shell, the sidebar's nvim)
+# stand for them, and kill -0 costs no process start.
+while kill -0 "$main_pane_pid" 2>/dev/null && kill -0 "$side_pane_pid" 2>/dev/null; do
+	# Same directory as before (same inode): nothing to read or do.
+	if ! [[ /proc/$main_pane_pid/cwd -ef $main_pane_prevcwd ]]; then
+		main_pane_cwd="$(pane_cwd "$main_pane_pid")"
+		if [[ -z "$main_pane_cwd" ]]; then
+			echo "Can't find main pane's cwd. Exiting.."
+			break
+		fi
+	else
+		main_pane_cwd="$main_pane_prevcwd"
 	fi
 
-	# Dir changed?
-	if [[ "$main_pane_cwd" != "$main_pane_prevcwd" ]]
-	then
-		if [[ "$main_pane_cwd"/ != "$side_pane_root"/* ]]	# it should not go through when it's the same dir.
-		then
-			# Root completely changed
+	if [[ "$main_pane_cwd" != "$main_pane_prevcwd" ]]; then
+		new_root_dir=""
+		if [[ "$main_pane_cwd"/ != "$side_pane_root"/* ]]; then
 			echo "Root changed: $main_pane_cwd"
-
-			if ! "$PYTHON_COMMAND" "$CURRENT_DIR/change_root.py" "$NVIM_ADDR" "$main_pane_cwd"; then
-				echo "Error on change_root.py"
-			fi
-			side_pane_root="$main_pane_cwd"
+			new_root_dir="$(tree_call change_root "$main_pane_cwd")"
+		elif [[ "$main_pane_prevcwd" == "$main_pane_cwd"/* ]]; then
+			# Going up within the root: close the child directory left
+			main_pane_child_dir=${main_pane_prevcwd#$main_pane_cwd/}
+			main_pane_first_child="$main_pane_cwd/${main_pane_child_dir%%/*}"
+			echo "Closing directory: $main_pane_first_child"
+			new_root_dir="$(tree_call go_parent "$main_pane_first_child" "$side_pane_root")"
 		else
-			if [[ "$main_pane_cwd" == "$main_pane_prevcwd"/* ]]; then
-				# The main pane is going into a child directory
-				# Open the child directory
-				# escape tmux's End key by separating it with a space
-				# find_file will open the directories
-				# If find file is not successful (possibly the user changed the root directory), change the root directory and find again
-				
-				echo "Opening directory: $main_pane_cwd"
-				new_root_dir=$("$PYTHON_COMMAND" "$CURRENT_DIR/go_random_within_rootdir.py" "$NVIM_ADDR" "$main_pane_cwd" "$side_pane_root")
-
-				if [[ $? -ne 0 ]]; then
-					echo "Error on go_random_within_rootdir.py"
-				else
-					side_pane_root="$new_root_dir"
-				fi
-
-			elif [[ "$main_pane_prevcwd" == "$main_pane_cwd"/* ]]; then
-				# The main pane is going to a parent directory, but not exiting the root directory
-				# Close the child directory
-				# Similar logic as above but with close
-				main_pane_child_dir=${main_pane_prevcwd#$main_pane_cwd/}
-				main_pane_first_child="$main_pane_cwd/${main_pane_child_dir%%/*}"
-				echo "Closing directory: $main_pane_first_child"
-				new_root_dir=$("$PYTHON_COMMAND" "$CURRENT_DIR/go_parent.py" "$NVIM_ADDR" "$main_pane_first_child" "$side_pane_root")
-				
-				if [[ $? -ne 0 ]]; then
-					echo "Error on go_parent.py"
-				else
-					side_pane_root="$new_root_dir"
-				fi
-			else
-				echo "Jumping to a random folder. Closing all directories and opening this one: $main_pane_cwd. Not changing root dir"
-				new_root_dir=$("$PYTHON_COMMAND" "$CURRENT_DIR/go_random_within_rootdir.py" "$NVIM_ADDR" "$main_pane_cwd" "$side_pane_root")
-
-				if [[ $? -ne 0 ]]; then
-					echo "Error on go_random_within_rootdir.py"
-				else
-					side_pane_root="$new_root_dir"
-				fi
-			fi
-
+			# Into a child, or elsewhere within the root: reveal and open it
+			echo "Opening directory: $main_pane_cwd"
+			new_root_dir="$(tree_call go_random "$main_pane_cwd" "$side_pane_root")"
 		fi
+		[[ -n $new_root_dir ]] && side_pane_root="$new_root_dir"
 		main_pane_prevcwd="$main_pane_cwd"
 	fi
 
-	main_pane_active=$(tmux display -pt "$MAIN_PANE_ID" '#{pane_active}')
-	side_pane_active=$(tmux display -pt "$SIDE_PANE_ID" '#{pane_active}')
-	window_active=$(tmux display -pt "$MAIN_PANE_ID" '#{window_active}')
-
-	if [[ "$main_pane_active" -eq 1 || "$side_pane_active" -eq 1 ]]; then
-		sleep "$REFRESH_INTERVAL"
-	elif [[ "$window_active" -eq 1 ]]; then
-		# Pane inactive but still in the same window
-		sleep "$REFRESH_INTERVAL_INACTIVE_PANE"
-	else
-		# Window inactive
-		sleep "$REFRESH_INTERVAL_INACTIVE_WINDOW"
+	# Poll fast only while the main pane or the sidebar is focused. Asking tmux
+	# starts a process, so while focused ask once per second, not every tick.
+	if (( tick % 10 == 0 )) || [[ $interval != "$REFRESH_INTERVAL" ]]; then
+		read -r -d '' main_pane_active window_active side_pane_active < <(
+			tmux display -pt "$MAIN_PANE_ID" '#{pane_active} #{window_active}' \; display -pt "$SIDE_PANE_ID" '#{pane_active}' 2>/dev/null
+		)
+		if [[ "$main_pane_active" == 1 || "$side_pane_active" == 1 ]]; then
+			interval="$REFRESH_INTERVAL"
+		elif [[ "$window_active" == 1 ]]; then
+			interval="$REFRESH_INTERVAL_INACTIVE_PANE"
+		else
+			interval="$REFRESH_INTERVAL_INACTIVE_WINDOW"
+		fi
 	fi
-
-	tmux list-panes -t "$MAIN_PANE_ID" &> /dev/null
-	[ "$?" -ne 0 ] && main_pane_exists=0
-	tmux list-panes -t "$SIDE_PANE_ID" &> /dev/null
-	[ "$?" -ne 0 ] && side_pane_exists=0
+	tick=$((tick + 1))
+	nap "$interval"
 done
