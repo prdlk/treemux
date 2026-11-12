@@ -110,18 +110,14 @@ kill_sidebar() {
 	# kill the sidebar
 	tmux kill-pane -t "$sidebar_pane_id"
 
-	# check current pane "expanded" properly
+	# check current pane "expanded" properly. A right sidebar is a full-height
+	# column at the window's right edge (split_sidebar_right): tmux hands its
+	# space to the neighbouring column, which need not hold the current pane,
+	# so resizing the current pane would move an unrelated border.
 	local new_current_pane_width="$(get_pane_info "$PANE_ID" "#{pane_width}")"
-	if current_pane_width_not_changed "$new_current_pane_width"; then
-		# need to expand current pane manually
-		local direction_flag
-		if [[ "$sidebar_position" =~ "left" ]]; then
-			direction_flag="-L"
-		else
-			direction_flag="-R"
-		fi
-		# compensate 1 column
-		tmux resize-pane "$direction_flag" "$((sidebar_width + 1))"
+	if [[ "$sidebar_position" =~ "left" ]] && current_pane_width_not_changed "$new_current_pane_width"; then
+		# need to expand current pane manually; compensate 1 column
+		tmux resize-pane -L "$((sidebar_width + 1))"
 	fi
 	PANE_WIDTH="$new_current_pane_width"
 }
@@ -239,7 +235,9 @@ split_sidebar_right() {
         exit 1
     fi
 
-    local sidebar_id="$(tmux split-window -h -l "$sidebar_size" -c "$NVIMTREE_ROOT_DIR" -P -F "#{pane_id}" \
+    # -f: a full-height column at the window's right edge, whatever panes sit
+    # right of the current one (anchor_sidebar.sh keeps it there)
+    local sidebar_id="$(tmux split-window -h -f -t "$PANE_ID" -l "$sidebar_size" -c "$NVIMTREE_ROOT_DIR" -P -F "#{pane_id}" \
         "$NVIM_COMMAND '$NVIMTREE_ROOT_DIR' --listen '$nvim_addr' ${common_args}")"
 
 	if [[ $ENABLE_DEBUG_PANE -eq 0 ]]

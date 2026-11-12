@@ -46,9 +46,21 @@ pathadd() {
 	fi
 }
 
+# Keep a right sidebar a full-height column at the window's right edge, at
+# its configured width, after splits, layout changes and panes closing
+# (scripts/anchor_sidebar.sh). Fixed hook indexes, so reloading the config
+# replaces these instead of appending copies.
+set_anchor_hooks() {
+	local hook
+	for hook in after-split-window after-select-layout after-kill-pane pane-exited; do
+		tmux set-hook -g "${hook}[73]" "run-shell -b '$SCRIPTS_DIR/anchor_sidebar.sh #{window_id}'"
+	done
+}
+
 main() {
 	set_default_key_binding_options
 	set_key_bindings
+	set_anchor_hooks
 	pathadd "$SCRIPTS_DIR/bin"
 }
 main
